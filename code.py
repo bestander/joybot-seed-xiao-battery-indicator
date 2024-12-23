@@ -1,149 +1,139 @@
+import time
 import board
 import digitalio
-import time
+import _bleio
+import struct
+
+# Try to import config
 try:
     import config
     TARGET_MAC = config.TARGET_MAC
     print(f"Looking for device with MAC: {TARGET_MAC}")
 except (ImportError, AttributeError):
     TARGET_MAC = None
-    print("No target MAC configured, scanning for ENJOYBOT device...")
+    print("No target MAC configured, scanning for BATTERY device...")
 
-# First try to import bleio, fall back to _bleio if not available
-try:
-    import bleio
-    BLE = bleio
-    print("Using bleio")
-except ImportError:
-    import _bleio
-    BLE = _bleio
-    print("Using _bleio")
+# Create UUIDs first so they're registered
+SERVICE_UUID = _bleio.UUID("0000ff00-0000-1000-8000-00805f9b34fb")
+CHAR_NOTIFY = _bleio.UUID("0000ff01-0000-1000-8000-00805f9b34fb")
+CHAR_WRITE = _bleio.UUID("0000ff02-0000-1000-8000-00805f9b34fb")
 
-def parse_advertisement(data):
-    """Parse BLE advertisement data"""
-    i = 0
-    services = set()
-    names = []
+# Create a whitelist of UUIDs we want to discover
+SERVICE_WHITELIST = [SERVICE_UUID]
+
+def decode_bms_data(data):
+    """Decode BMS data packet"""
+    if len(data) < 4:
+        return
     
-    while i < len(data):
-        length = data[i]
-        if length == 0:
-            break
-        
-        if i + length + 1 > len(data):
-            break
+    # Check packet header (0xDD)
+    if data[0] != 0xDD:
+        return
+    
+    # Decode based on command type
+    if data[1] == 0x03:  # Basic info
+        if len(data) >= 13:
+            voltage = (data[4] << 8 | data[5]) / 100.0
+            current = ((data[6] << 8 | data[7]) / 100.0)
+            soc = data[10]
+            power = voltage * current
             
-        type_id = data[i + 1]
-        value = data[i + 2:i + length + 1]
-        
-        # Type 0x02 or 0x03: 16-bit Service Class UUIDs
-        if type_id in (0x02, 0x03) and length >= 3:
-            for j in range(0, len(value), 2):
-                if j + 1 < len(value):
-                    service = (value[j+1] << 8) | value[j]
-                    services.add(service)
-        
-        # Type 0x08: Shortened Local Name
-        elif type_id == 0x08:
-            try:
-                names.append(bytes(value).decode('utf-8'))
-            except:
-                pass
-                
-        # Type 0x09: Complete Local Name
-        elif type_id == 0x09:
-            try:
-                names.append(bytes(value).decode('utf-8'))
-            except:
-                pass
-        
-        i += length + 1
-    
-    return services, names
+            print("\n=== Battery Status ===")
+            print(f"Voltage: {voltage:.1f}V")
+            print(f"Current: {current:.1f}A")
+            print(f"Power: {power:.1f}W")
+            print(f"SOC: {soc}%")
+            print("===================")
+
+def request_bms_data(write_char):
+    """Send request for basic info"""
+    cmd = bytes([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77])
+    write_char.write(cmd)
 
 # Set up the LED
 led = digitalio.DigitalInOut(board.LED_BLUE)
 led.direction = digitalio.Direction.OUTPUT
 
-try:
-    print("Getting BLE adapter...")
-    adapter = BLE.adapter
-    print("Enabling adapter...")
-    adapter.enabled = True
-    print("Adapter enabled successfully")
-except Exception as e:
-    print("Error initializing BLE:", str(e))
-    # Keep the board running to see the error
-    while True:
-        led.value = True
-        time.sleep(0.5)
-        led.value = False
-        time.sleep(0.5)
+# Initialize BLE
+adapter = _bleio.adapter
+adapter.enabled = True
 
-print("scanning...")
-seen_addresses = set()  # Track devices we've seen
+print("Starting BLE scan...")
 
 while True:
     led.value = True
-    print("\nStarting scan...")
+    print("\nScanning...")
     
     try:
-        # Start scan
         for scan in adapter.start_scan():
-            addr_bytes = scan.address.address_bytes
-            addr = ':'.join(['{:02X}'.format(b) for b in addr_bytes])
+            addr = ':'.join(['{:02X}'.format(b) for b in scan.address.address_bytes])
             
-            if addr not in seen_addresses:
-                seen_addresses.add(addr)
+            if TARGET_MAC and addr == TARGET_MAC:
+                print(f"Found target device!")
+                adapter.stop_scan()
                 
-                # If we have a target MAC, only process that device
-                if TARGET_MAC and addr == TARGET_MAC:
-                    print("-" * 40)
-                    print(f"Target device found!")
-                    print(f"Address: {addr}")
-                    print(f"RSSI: {scan.rssi} dBm")
-                    if scan.advertisement_bytes:
-                        print(f"Advertisement: {bytes(scan.advertisement_bytes).hex()}")
-                    print()
+                try:
+                    print("Connecting...")
+                    connection = adapter.connect(scan.address, timeout=10)
+                    print("Connected!")
                     
-                # If no target MAC, look for devices by service and name
-                elif not TARGET_MAC and scan.advertisement_bytes:
-                    adv_bytes = bytes(scan.advertisement_bytes)
-                    services, names = parse_advertisement(adv_bytes)
+                    if connection.connected:
+                        print("Discovering services with whitelist...")
+                        # Pass the whitelist to discover_remote_services
+                        for service in connection.discover_remote_services(SERVICE_WHITELIST):
+                            print(f"Found service: {service.uuid}")
+                            if service.uuid == SERVICE_UUID:
+                                print("Found Battery Service!")
+                                
+                                # Get characteristics
+                                notify_char = None
+                                write_char = None
+                                
+                                for char in service.characteristics:
+                                    if char.uuid == CHAR_NOTIFY:
+                                        notify_char = char
+                                    elif char.uuid == CHAR_WRITE:
+                                        write_char = char
+                                
+                                if notify_char and write_char:
+                                    print("Found characteristics!")
+                                    
+                                    # Enable notifications
+                                    notify_char.set_cccd(notify=True)
+                                    
+                                    # Main communication loop
+                                    while connection.connected:
+                                        # Request data
+                                        request_bms_data(write_char)
+                                        
+                                        # Wait for and process notification
+                                        data = notify_char.read()
+                                        if data:
+                                            print("Received:", [hex(b) for b in data])
+                                            decode_bms_data(data)
+                                        
+                                        time.sleep(2)
+                                else:
+                                    print("Failed to find characteristics")
+                                break
+                        else:
+                            print("Failed to find battery service")
                     
-                    # Check for our target services
-                    if (0xFF00 in services or 0x180A in services):
-                        print("-" * 40)
-                        print(f"Found interesting device!")
-                        print(f"Address: {addr}")
-                        print(f"RSSI: {scan.rssi} dBm")
-                        print(f"Services: {[hex(s) for s in services]}")
-                        if names:
-                            print(f"Device names: {names}")
-                        
-                        # Print raw data for debugging
-                        print(f"Raw advertisement: {adv_bytes.hex()}")
-                        
-                        if 0xFF00 in services:
-                            print("Has FF00 (Custom) Service")
-                        if 0x180A in services:
-                            print("Has 180A (Device Information) Service")
-                        
-                        if any('ENJOYBOT' in name for name in names):
-                            print("*** FOUND ENJOYBOT DEVICE! ***")
-                        print()
-        
-        # Clear seen devices and stop scan
-        seen_addresses.clear()
-        time.sleep(1)
-        adapter.stop_scan()
-        
+                except Exception as e:
+                    print(f"Connection error: {e}")
+                finally:
+                    try:
+                        connection.disconnect()
+                    except:
+                        pass
+                break
+    
     except Exception as e:
-        print("Scan error:", str(e))
+        print(f"Scan error: {e}")
         try:
             adapter.stop_scan()
         except:
             pass
     
     led.value = False
-    time.sleep(1)  # Wait between scans
+    time.sleep(1)
