@@ -1,0 +1,8 @@
+.fseventsd/
+.vscode/
+examples/
+.Trashes
+.DS_Store
+.metadata_never_index
+._*
+boot_out.txt
