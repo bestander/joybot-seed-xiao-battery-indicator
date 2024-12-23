@@ -48,7 +48,8 @@ def decode_bms_data(data):
 def request_bms_data(write_char):
     """Send request for basic info"""
     cmd = bytes([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77])
-    write_char.write(cmd)
+    # Use the raw write method from _bleio.Characteristic
+    write_char.value = cmd
 
 # Set up the LED
 led = digitalio.DigitalInOut(board.LED_BLUE)
@@ -79,7 +80,6 @@ while True:
                     
                     if connection.connected:
                         print("Discovering services with whitelist...")
-                        # Pass the whitelist to discover_remote_services
                         for service in connection.discover_remote_services(SERVICE_WHITELIST):
                             print(f"Found service: {service.uuid}")
                             if service.uuid == SERVICE_UUID:
@@ -107,7 +107,7 @@ while True:
                                         request_bms_data(write_char)
                                         
                                         # Wait for and process notification
-                                        data = notify_char.read()
+                                        data = notify_char.value
                                         if data:
                                             print("Received:", [hex(b) for b in data])
                                             decode_bms_data(data)
