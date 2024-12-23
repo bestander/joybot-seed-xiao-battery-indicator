@@ -1,7 +1,6 @@
 import board
 import digitalio
 import time
-print("importing board")
 
 # First try to import bleio, fall back to _bleio if not available
 try:
@@ -13,9 +12,37 @@ except ImportError:
     BLE = _bleio
     print("Using _bleio")
 
+def parse_advertisement(data):
+    """Parse BLE advertisement data"""
+    i = 0
+    services = set()
+    while i < len(data):
+        length = data[i]
+        if length == 0:
+            break
+        
+        if i + length + 1 > len(data):
+            break
+            
+        type_id = data[i + 1]
+        value = data[i + 2:i + length + 1]
+        
+        # Type 0x02 or 0x03: 16-bit Service Class UUIDs
+        if type_id in (0x02, 0x03) and length >= 3:
+            for j in range(0, len(value), 2):
+                if j + 1 < len(value):
+                    service = (value[j+1] << 8) | value[j]
+                    services.add(service)
+        
+        i += length + 1
+    
+    return services
+
 # Set up the LED
 led = digitalio.DigitalInOut(board.LED_BLUE)
 led.direction = digitalio.Direction.OUTPUT
+
+print("Looking for devices with FF00 or 180A services...")
 
 try:
     print("Getting BLE adapter...")
@@ -33,7 +60,7 @@ except Exception as e:
         time.sleep(0.5)
 
 print("scanning...")
-seen_addresses = set()  # Keep track of devices we've seen
+seen_addresses = set()  # Track devices we've seen
 
 while True:
     led.value = True
@@ -42,22 +69,32 @@ while True:
     try:
         # Start scan
         for scan in adapter.start_scan():
-            # Only show devices with decent signal strength and non-empty advertisements
-            if scan.rssi > -70 and scan.advertisement_bytes:
-                addr = ':'.join([hex(i) for i in scan.address.address_bytes])
+            addr_bytes = scan.address.address_bytes
+            addr = ':'.join(['{:02X}'.format(b) for b in addr_bytes])
+            
+            if addr not in seen_addresses:
+                seen_addresses.add(addr)
                 
-                # Only show each device once per scan cycle
-                if addr not in seen_addresses:
-                    seen_addresses.add(addr)
-                    print("-" * 40)
-                    print(f"New device found! RSSI: {scan.rssi} dBm")
-                    print(f"Address: {addr}")
-                    print(f"Advertisement: {bytes(scan.advertisement_bytes).hex()}")
+                if scan.advertisement_bytes:
+                    adv_bytes = bytes(scan.advertisement_bytes)
+                    services = parse_advertisement(adv_bytes)
+                    
+                    # Check for our target services
+                    if 0xFF00 in services or 0x180A in services:
+                        print("-" * 40)
+                        print(f"Found interesting device!")
+                        print(f"Address: {addr}")
+                        print(f"RSSI: {scan.rssi} dBm")
+                        print(f"Services: {[hex(s) for s in services]}")
+                        
+                        if 0xFF00 in services:
+                            print("Has FF00 (Custom) Service")
+                        if 0x180A in services:
+                            print("Has 180A (Device Information) Service")
+                        print()
         
-        # Clear seen devices for next scan cycle
+        # Clear seen devices and stop scan
         seen_addresses.clear()
-        
-        # Stop scan after 1 second
         time.sleep(1)
         adapter.stop_scan()
         
@@ -69,5 +106,4 @@ while True:
             pass
     
     led.value = False
-    time.sleep(2)  # Wait longer between scans
-    
+    time.sleep(1)  # Wait between scans
