@@ -1,6 +1,13 @@
 import board
 import digitalio
 import time
+try:
+    import config
+    TARGET_MAC = config.TARGET_MAC
+    print(f"Looking for device with MAC: {TARGET_MAC}")
+except (ImportError, AttributeError):
+    TARGET_MAC = None
+    print("No target MAC configured, scanning for ENJOYBOT device...")
 
 # First try to import bleio, fall back to _bleio if not available
 try:
@@ -16,6 +23,8 @@ def parse_advertisement(data):
     """Parse BLE advertisement data"""
     i = 0
     services = set()
+    names = []
+    
     while i < len(data):
         length = data[i]
         if length == 0:
@@ -34,15 +43,27 @@ def parse_advertisement(data):
                     service = (value[j+1] << 8) | value[j]
                     services.add(service)
         
+        # Type 0x08: Shortened Local Name
+        elif type_id == 0x08:
+            try:
+                names.append(bytes(value).decode('utf-8'))
+            except:
+                pass
+                
+        # Type 0x09: Complete Local Name
+        elif type_id == 0x09:
+            try:
+                names.append(bytes(value).decode('utf-8'))
+            except:
+                pass
+        
         i += length + 1
     
-    return services
+    return services, names
 
 # Set up the LED
 led = digitalio.DigitalInOut(board.LED_BLUE)
 led.direction = digitalio.Direction.OUTPUT
-
-print("Looking for devices with FF00 or 180A services...")
 
 try:
     print("Getting BLE adapter...")
@@ -75,22 +96,41 @@ while True:
             if addr not in seen_addresses:
                 seen_addresses.add(addr)
                 
-                if scan.advertisement_bytes:
+                # If we have a target MAC, only process that device
+                if TARGET_MAC and addr == TARGET_MAC:
+                    print("-" * 40)
+                    print(f"Target device found!")
+                    print(f"Address: {addr}")
+                    print(f"RSSI: {scan.rssi} dBm")
+                    if scan.advertisement_bytes:
+                        print(f"Advertisement: {bytes(scan.advertisement_bytes).hex()}")
+                    print()
+                    
+                # If no target MAC, look for devices by service and name
+                elif not TARGET_MAC and scan.advertisement_bytes:
                     adv_bytes = bytes(scan.advertisement_bytes)
-                    services = parse_advertisement(adv_bytes)
+                    services, names = parse_advertisement(adv_bytes)
                     
                     # Check for our target services
-                    if 0xFF00 in services or 0x180A in services:
+                    if (0xFF00 in services or 0x180A in services):
                         print("-" * 40)
                         print(f"Found interesting device!")
                         print(f"Address: {addr}")
                         print(f"RSSI: {scan.rssi} dBm")
                         print(f"Services: {[hex(s) for s in services]}")
+                        if names:
+                            print(f"Device names: {names}")
+                        
+                        # Print raw data for debugging
+                        print(f"Raw advertisement: {adv_bytes.hex()}")
                         
                         if 0xFF00 in services:
                             print("Has FF00 (Custom) Service")
                         if 0x180A in services:
                             print("Has 180A (Device Information) Service")
+                        
+                        if any('ENJOYBOT' in name for name in names):
+                            print("*** FOUND ENJOYBOT DEVICE! ***")
                         print()
         
         # Clear seen devices and stop scan

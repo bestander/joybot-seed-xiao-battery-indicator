@@ -6,3 +6,4 @@ examples/
 .metadata_never_index
 ._*
 boot_out.txt
+config.py
